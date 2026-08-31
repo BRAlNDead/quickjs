@@ -374,6 +374,10 @@ void JS_SetMaxStackSize(JSRuntime *rt, size_t stack_size);
 /* should be called when changing thread to update the stack top value
    used to check stack overflow. */
 void JS_UpdateStackTop(JSRuntime *rt);
+/* Loki: get/set the per-runtime stack_top anchor for save/restore across nested
+   or cross-thread JS entries (see JS_UpdateStackTop). */
+uintptr_t JS_GetStackTop(JSRuntime *rt);
+void JS_SetStackTop(JSRuntime *rt, uintptr_t stack_top);
 JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque);
 void JS_FreeRuntime(JSRuntime *rt);
 void *JS_GetRuntimeOpaque(JSRuntime *rt);

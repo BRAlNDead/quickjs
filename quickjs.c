@@ -2356,6 +2356,21 @@ void JS_UpdateStackTop(JSRuntime *rt)
     update_stack_limit(rt);
 }
 
+/* Loki: save/restore the per-runtime stack_top anchor so nested JS entries
+ * (reentrant sync-hook callbacks, cross-thread dispatch) can each measure the
+ * soft stack budget from their own frame and then restore the caller's anchor
+ * on exit, instead of leaving a stale/mismatched stack_top behind. */
+uintptr_t JS_GetStackTop(JSRuntime *rt)
+{
+    return rt->stack_top;
+}
+
+void JS_SetStackTop(JSRuntime *rt, uintptr_t stack_top)
+{
+    rt->stack_top = stack_top;
+    update_stack_limit(rt);
+}
+
 static inline BOOL is_strict_mode(JSContext *ctx)
 {
     JSStackFrame *sf = ctx->rt->current_stack_frame;
