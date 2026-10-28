@@ -863,6 +863,15 @@ JSValue JS_ParseJSON2(JSContext *ctx, const char *buf, size_t buf_len,
 JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
                          JSValueConst replacer, JSValueConst space0);
 
+/* Stream JSON as UTF-8 without constructing a complete JS string. The writer
+ * must return 0 on success, -1 with a pending exception on failure. It must not
+ * publish partial data: a later getter/toJSON may still throw. Returns true on
+ * success, undefined for an omitted root value, or JS_EXCEPTION. */
+typedef int JSJSONWriter(JSContext *ctx, void *opaque, const char *bytes, size_t len);
+JSValue JS_JSONStringifyToWriter(JSContext *ctx, JSValueConst obj,
+                                JSValueConst replacer, JSValueConst space,
+                                JSJSONWriter *writer, void *opaque);
+
 typedef void JSFreeArrayBufferDataFunc(JSRuntime *rt, void *opaque, void *ptr);
 JSValue JS_NewArrayBuffer(JSContext *ctx, uint8_t *buf, size_t len,
                           JSFreeArrayBufferDataFunc *free_func, void *opaque,

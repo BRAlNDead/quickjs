@@ -3509,6 +3509,8 @@ typedef struct StringBuffer {
     int size;
     int is_wide_char;
     int error_status;
+    JSJSONWriter *writer;
+    void *writer_opaque;
 } StringBuffer;
 
 /* It is valid to call string_buffer_end() and all string_buffer functions even
@@ -3523,6 +3525,8 @@ static int string_buffer_init2(JSContext *ctx, StringBuffer *s, int size,
     s->len = 0;
     s->is_wide_char = is_wide;
     s->error_status = 0;
+    s->writer = NULL;
+    s->writer_opaque = NULL;
     s->str = js_alloc_string(ctx, size, is_wide);
     if (unlikely(!s->str)) {
         s->size = 0;
@@ -3553,6 +3557,37 @@ static int string_buffer_set_error(StringBuffer *s)
     s->size = 0;
     s->len = 0;
     return s->error_status = -1;
+}
+
+static no_inline __exception int __js_poll_interrupts(JSContext *ctx);
+
+/* Keep the streaming buffer bounded, including a surrogate spanning a flush.
+ * Other StringBuffer users keep their ordinary allocation and return values. */
+static int string_buffer_flush_json(StringBuffer *s, int final)
+{
+    uint8_t bytes[4096 * 3 + 4];
+    int i, end = s->len, n = 0;
+    if (s->error_status)
+        return -1;
+    if (!final && end && s->is_wide_char &&
+        is_hi_surrogate(s->str->u.str16[end - 1]))
+        end--;
+    for (i = 0; i < end; i++) {
+        uint32_t c = s->is_wide_char ? s->str->u.str16[i] : s->str->u.str8[i];
+        if (is_hi_surrogate(c) && i + 1 < end &&
+            is_lo_surrogate(s->str->u.str16[i + 1])) {
+            c = from_surrogate(c, s->str->u.str16[++i]);
+        }
+        n += unicode_to_utf8(bytes + n, c);
+    }
+    if (__js_poll_interrupts(s->ctx))
+        return string_buffer_set_error(s);
+    if (n && s->writer(s->ctx, s->writer_opaque, (const char *)bytes, n) < 0)
+        return string_buffer_set_error(s);
+    if (end < s->len)
+        s->str->u.str16[0] = s->str->u.str16[end];
+    s->len -= end;
+    return 0;
 }
 
 static no_inline int string_buffer_widen(StringBuffer *s, int size)
@@ -3625,6 +3660,8 @@ static no_inline int string_buffer_putc_slow(StringBuffer *s, uint32_t c)
 /* 0 <= c <= 0xff */
 static int string_buffer_putc8(StringBuffer *s, uint32_t c)
 {
+    if (s->writer && s->len >= 4096 && string_buffer_flush_json(s, 0))
+        return -1;
     if (unlikely(s->len >= s->size)) {
         if (string_buffer_realloc(s, s->len + 1, c))
             return -1;
@@ -3640,6 +3677,8 @@ static int string_buffer_putc8(StringBuffer *s, uint32_t c)
 /* 0 <= c <= 0xffff */
 static int string_buffer_putc16(StringBuffer *s, uint32_t c)
 {
+    if (s->writer && s->len >= 4096 && string_buffer_flush_json(s, 0))
+        return -1;
     if (likely(s->len < s->size)) {
         if (s->is_wide_char) {
             s->str->u.str16[s->len++] = c;
@@ -3686,6 +3725,12 @@ static int string_getc(const JSString *p, int *pidx)
 
 static int string_buffer_write8(StringBuffer *s, const uint8_t *p, int len)
 {
+    if (s->writer) {
+        for (int k = 0; k < len; k++)
+            if (string_buffer_putc8(s, p[k])) return -1;
+        return 0;
+    }
+
     int i;
 
     if (s->len + len > s->size) {
@@ -3706,6 +3751,12 @@ static int string_buffer_write8(StringBuffer *s, const uint8_t *p, int len)
 
 static int string_buffer_write16(StringBuffer *s, const uint16_t *p, int len)
 {
+    if (s->writer) {
+        for (int k = 0; k < len; k++)
+            if (string_buffer_putc16(s, p[k])) return -1;
+        return 0;
+    }
+
     int c = 0, i;
 
     for (i = 0; i < len; i++) {
@@ -46959,8 +47010,9 @@ exception:
     return -1;
 }
 
-JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
-                         JSValueConst replacer, JSValueConst space0)
+static JSValue js_json_stringify_impl(JSContext *ctx, JSValueConst obj,
+                                      JSValueConst replacer, JSValueConst space0,
+                                      JSJSONWriter *writer, void *opaque)
 {
     StringBuffer b_s;
     JSONStringifyContext jsc_s, *jsc = &jsc_s;
@@ -46978,6 +47030,8 @@ JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
     wrapper = JS_UNDEFINED;
 
     string_buffer_init(ctx, jsc->b, 0);
+    jsc->b->writer = writer;
+    jsc->b->writer_opaque = opaque;
     jsc->stack = JS_NewArray(ctx);
     if (JS_IsException(jsc->stack))
         goto exception;
@@ -47077,6 +47131,12 @@ JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
     if (js_json_to_str(ctx, jsc, wrapper, val, jsc->empty))
         goto exception;
 
+    if (writer) {
+        if (string_buffer_flush_json(jsc->b, 1))
+            goto exception;
+        ret = JS_TRUE;
+        goto done1;
+    }
     ret = string_buffer_end(jsc->b);
     goto done;
 
@@ -47091,6 +47151,21 @@ done:
     JS_FreeValue(ctx, jsc->property_list);
     JS_FreeValue(ctx, jsc->stack);
     return ret;
+}
+
+JSValue JS_JSONStringify(JSContext *ctx, JSValueConst obj,
+                         JSValueConst replacer, JSValueConst space)
+{
+    return js_json_stringify_impl(ctx, obj, replacer, space, NULL, NULL);
+}
+
+JSValue JS_JSONStringifyToWriter(JSContext *ctx, JSValueConst obj,
+                                JSValueConst replacer, JSValueConst space,
+                                JSJSONWriter *writer, void *opaque)
+{
+    if (!writer)
+        return JS_ThrowTypeError(ctx, "JSON writer required");
+    return js_json_stringify_impl(ctx, obj, replacer, space, writer, opaque);
 }
 
 static JSValue js_json_stringify(JSContext *ctx, JSValueConst this_val,
