@@ -46,6 +46,10 @@
 extern const uint8_t qjsc_repl[];
 extern const uint32_t qjsc_repl_size;
 
+#ifdef CONFIG_TEMPORAL_INTL
+static int enable_experimental = 0;
+#endif
+
 static int eval_buf(JSContext *ctx, const void *buf, int buf_len,
                     const char *filename, int eval_flags)
 {
@@ -75,7 +79,7 @@ static int eval_buf(JSContext *ctx, const void *buf, int buf_len,
     return ret;
 }
 
-static int eval_file(JSContext *ctx, const char *filename, int module)
+static int eval_file(JSContext *ctx, const char *filename, int module, int strict)
 {
     uint8_t *buf;
     int ret, eval_flags;
@@ -91,10 +95,13 @@ static int eval_file(JSContext *ctx, const char *filename, int module)
         module = (has_suffix(filename, ".mjs") ||
                   JS_DetectModule((const char *)buf, buf_len));
     }
-    if (module)
+    if (module) {
         eval_flags = JS_EVAL_TYPE_MODULE;
-    else
+    } else {
         eval_flags = JS_EVAL_TYPE_GLOBAL;
+        if (strict)
+            eval_flags |= JS_EVAL_FLAG_STRICT;
+    }
     ret = eval_buf(ctx, buf, buf_len, filename, eval_flags);
     js_free(ctx, buf);
     return ret;
@@ -110,6 +117,12 @@ static JSContext *JS_NewCustomContext(JSRuntime *rt)
     /* system modules */
     js_init_module_std(ctx, "std");
     js_init_module_os(ctx, "os");
+#ifdef CONFIG_TEMPORAL_INTL
+    if (enable_experimental) {
+        JS_AddIntrinsicTemporal(ctx);
+        JS_AddIntrinsicIntl(ctx);
+    }
+#endif
     return ctx;
 }
 
@@ -136,7 +149,7 @@ static size_t js_trace_malloc_usable_size(const void *ptr)
     return malloc_size(ptr);
 #elif defined(_WIN32)
     return _msize((void *)ptr);
-#elif defined(EMSCRIPTEN)
+#elif defined(__EMSCRIPTEN__)
     return 0;
 #elif defined(__linux__) || defined(__GLIBC__)
     return malloc_usable_size((void *)ptr);
@@ -294,6 +307,7 @@ void help(void)
            "-i  --interactive  go to interactive mode\n"
            "-m  --module       load as ES6 module (default=autodetect)\n"
            "    --script       load as ES6 script (default=autodetect)\n"
+           "    --strict       force strict mode\n"
            "-I  --include file include an additional file\n"
            "    --std          make 'std' and 'os' available to the loaded script\n"
            "-T  --trace        trace memory allocation\n"
@@ -303,6 +317,9 @@ void help(void)
            "    --no-unhandled-rejection  ignore unhandled promise rejections\n"
            "-s                    strip all the debug info\n"
            "    --strip-source    strip the source code\n"
+#ifdef CONFIG_TEMPORAL_INTL
+           "    --experimental    enable experimental Temporal and Intl support\n"
+#endif
            "-q  --quit         just instantiate the interpreter and quit\n");
     exit(1);
 }
@@ -319,6 +336,7 @@ int main(int argc, char **argv)
     int trace_memory = 0;
     int empty_run = 0;
     int module = -1;
+    int strict = 0;
     int load_std = 0;
     int dump_unhandled_promise_rejection = 1;
     size_t memory_limit = 0;
@@ -388,6 +406,10 @@ int main(int argc, char **argv)
                 module = 0;
                 continue;
             }
+            if (!strcmp(longopt, "strict")) {
+                strict = 1;
+                continue;
+            }
             if (opt == 'd' || !strcmp(longopt, "dump")) {
                 dump_memory++;
                 continue;
@@ -404,6 +426,12 @@ int main(int argc, char **argv)
                 dump_unhandled_promise_rejection = 0;
                 continue;
             }
+#ifdef CONFIG_TEMPORAL_INTL
+            if (!strcmp(longopt, "experimental")) {
+                enable_experimental = TRUE;
+                continue;
+            }
+#endif     
             if (opt == 'q' || !strcmp(longopt, "quit")) {
                 empty_run++;
                 continue;
@@ -485,12 +513,20 @@ int main(int argc, char **argv)
         }
 
         for(i = 0; i < include_count; i++) {
-            if (eval_file(ctx, include_list[i], module))
+            if (eval_file(ctx, include_list[i], 0, strict))
                 goto fail;
         }
 
         if (expr) {
-            if (eval_buf(ctx, expr, strlen(expr), "<cmdline>", 0))
+            int eval_flags;
+            if (module > 0) {
+                eval_flags = JS_EVAL_TYPE_MODULE;
+            } else {
+                eval_flags = JS_EVAL_TYPE_GLOBAL;
+                if (strict)
+                    eval_flags |= JS_EVAL_FLAG_STRICT;
+            }
+            if (eval_buf(ctx, expr, strlen(expr), "<cmdline>", eval_flags))
                 goto fail;
         } else
         if (optind >= argc) {
@@ -499,7 +535,7 @@ int main(int argc, char **argv)
         } else {
             const char *filename;
             filename = argv[optind];
-            if (eval_file(ctx, filename, module))
+            if (eval_file(ctx, filename, module, strict))
                 goto fail;
         }
         if (interactive) {

@@ -41,6 +41,11 @@ endif
 #CONFIG_M32=y
 # cosmopolitan build (see https://github.com/jart/cosmopolitan)
 #CONFIG_COSMO=y
+# experimental Temporal and Intl support (disable if your C compiler
+# does not support 128 bit integers)
+ifndef CONFIG_M32
+CONFIG_TEMPORAL_INTL=y
+endif
 
 # installation directory
 PREFIX?=/usr/local
@@ -53,6 +58,12 @@ PREFIX?=/usr/local
 #CONFIG_MSAN=y
 # use UB sanitizer
 #CONFIG_UBSAN=y
+# use thread sanitizer
+#CONFIG_TSAN=y
+
+# TEST262 bootstrap config: commit id and shallow "since" parameter
+TEST262_COMMIT?=91c70759363c46557b694792bf34a2551a7af5ba
+TEST262_SINCE?=2025-09-01
 
 OBJDIR=.obj
 
@@ -122,13 +133,15 @@ else ifdef CONFIG_COSMO
   CC=cosmocc
   # cosmocc does not correct support -MF
   CFLAGS=-g -Wall #-MMD -MF $(OBJDIR)/$(@F).d
-  CFLAGS += -Wno-array-bounds -Wno-format-truncation
+  CFLAGS += -Wno-array-bounds -Wno-format-truncation -Wno-infinite-recursion
   AR=cosmoar
 else
   HOST_CC=gcc
   CC=$(CROSS_PREFIX)gcc
   CFLAGS+=-g -Wall -MMD -MF $(OBJDIR)/$(@F).d
   CFLAGS += -Wno-array-bounds -Wno-format-truncation -Wno-infinite-recursion
+  check_warning = $(shell $(CC) $(1) -c -x c /dev/null -o /dev/null 2>/dev/null && echo $(1))
+  CFLAGS += $(call check_warning, -Wbidi-chars=unpaired)
   ifdef CONFIG_LTO
     AR=$(CROSS_PREFIX)gcc-ar
   else
@@ -155,6 +168,9 @@ ifndef CONFIG_WIN32
 ifeq ($(shell $(CC) -o /dev/null compat/test-closefrom.c 2>/dev/null && echo 1),1)
 DEFINES+=-DHAVE_CLOSEFROM
 endif
+endif
+ifdef CONFIG_TEMPORAL_INTL
+DEFINES+=-DCONFIG_TEMPORAL_INTL
 endif
 
 CFLAGS+=$(DEFINES)
@@ -187,6 +203,10 @@ endif
 ifdef CONFIG_UBSAN
 CFLAGS+=-fsanitize=undefined -fno-omit-frame-pointer
 LDFLAGS+=-fsanitize=undefined -fno-omit-frame-pointer
+endif
+ifdef CONFIG_TSAN
+CFLAGS+=-fsanitize=thread -fno-omit-frame-pointer
+LDFLAGS+=-fsanitize=thread -fno-omit-frame-pointer
 endif
 ifdef CONFIG_WIN32
 LDEXPORT=
@@ -240,6 +260,10 @@ endif
 all: $(OBJDIR) $(OBJDIR)/quickjs.check.o $(OBJDIR)/qjs.check.o $(PROGS)
 
 QJS_LIB_OBJS=$(OBJDIR)/quickjs.o $(OBJDIR)/dtoa.o $(OBJDIR)/libregexp.o $(OBJDIR)/libunicode.o $(OBJDIR)/cutils.o $(OBJDIR)/quickjs-libc.o
+ifdef CONFIG_TEMPORAL_INTL
+QJS_LIB_OBJS+=$(addprefix $(OBJDIR)/intl/, intl.o locale.o locale-data.o numberformat.o collator.o datetimeformat.o pluralrules.o listformat.o relativetimeformat.o displaynames.o segmenter.o durationformat.o)
+QJS_LIB_OBJS+=$(addprefix $(OBJDIR)/temporal/, temporal.o instant.o duration.o plaintime.o now.o plaindate.o plaindatetime.o plainyearmonth.o plainmonthday.o zoneddatetime.o calendar.o timezone.o tzdata_generated.o)
+endif
 
 QJS_OBJS=$(OBJDIR)/qjs.o $(OBJDIR)/repl.o $(QJS_LIB_OBJS)
 
@@ -251,7 +275,7 @@ endif
 LIBS+=$(EXTRA_LIBS)
 
 $(OBJDIR):
-	mkdir -p $(OBJDIR) $(OBJDIR)/examples $(OBJDIR)/tests
+	mkdir -p $(OBJDIR) $(OBJDIR)/intl $(OBJDIR)/temporal $(OBJDIR)/examples $(OBJDIR)/tests
 
 qjs$(EXE): $(QJS_OBJS)
 	$(CC) $(LDFLAGS) $(LDEXPORT) -o $@ $^ $(LIBS)
@@ -452,10 +476,14 @@ test: qjs$(EXE)
 	$(WINE) ./qjs$(EXE) tests/test_worker.js
 ifndef CONFIG_WIN32
 	$(WINE) ./qjs$(EXE) tests/test_std.js
+	$(WINE) ./qjs$(EXE) tests/test_rw_handler.js
 endif
 ifdef CONFIG_SHARED_LIBS
 	$(WINE) ./qjs$(EXE) tests/test_bjson.js
 	$(WINE) ./qjs$(EXE) examples/test_point.js
+endif
+ifdef CONFIG_TEMPORAL_INTL
+	$(WINE) ./qjs$(EXE) --experimental tests/test_intl.js
 endif
 
 stats: qjs$(EXE)
@@ -463,6 +491,15 @@ stats: qjs$(EXE)
 
 microbench: qjs$(EXE)
 	$(WINE) ./qjs$(EXE) --std tests/microbench.js
+
+ifeq ($(wildcard test262/features.txt),)
+test2-bootstrap:
+	git clone --single-branch --shallow-since=$(TEST262_SINCE) https://github.com/tc39/test262.git
+	(cd test262 && git checkout -q $(TEST262_COMMIT) && patch -p1 < ../tests/test262.patch && cd ..)
+else
+test2-bootstrap:
+	(cd test262 && git fetch && git reset --hard $(TEST262_COMMIT) && patch -p1 < ../tests/test262.patch && cd ..)
+endif
 
 ifeq ($(wildcard test262o/tests.txt),)
 test2o test2o-update:
