@@ -13988,6 +13988,11 @@ static JSValue JS_ToLocaleStringFree(JSContext *ctx, JSValue val,
 {
     if (JS_IsUndefined(val) || JS_IsNull(val))
         return JS_ToStringFree(ctx, val);
+#ifndef CONFIG_TEMPORAL_INTL
+    /* Without ECMA-402, Array/TypedArray element calls take no arguments. */
+    argc = 0;
+    argv = NULL;
+#endif
     return JS_InvokeFree(ctx, val, JS_ATOM_toLocaleString, argc, argv);
 }
 
