@@ -1189,21 +1189,6 @@ test();
 test_function();
 test_enum();
 test_array();
-// ECMA-262 element calls have no arguments unless ECMA-402 is enabled.
-if (typeof Intl === 'undefined') {
-    assert([{ toLocaleString(...args) { assert(args.length, 0); return 'ok'; } }]
-           .toLocaleString('en', {}), 'ok');
-    for (const [proto, array] of [[Number.prototype, new Uint8Array([1])],
-                                 [BigInt.prototype, new BigInt64Array([1n])]]) {
-        const original = proto.toLocaleString;
-        try {
-            proto.toLocaleString = function (...args) { assert(args.length, 0); return 'ok'; };
-            assert(array.toLocaleString('en', {}), 'ok');
-        } finally {
-            proto.toLocaleString = original;
-        }
-    }
-}
 test_string();
 test_math();
 test_number();

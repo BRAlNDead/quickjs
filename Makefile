@@ -470,6 +470,9 @@ test: qjs$(EXE)
 	$(WINE) ./qjs$(EXE) tests/test_closure.js
 	$(WINE) ./qjs$(EXE) tests/test_language.js
 	$(WINE) ./qjs$(EXE) --std tests/test_builtin.js
+ifndef CONFIG_TEMPORAL_INTL
+	$(WINE) ./qjs$(EXE) tests/test_non_intl.js
+endif
 	$(WINE) ./qjs$(EXE) tests/test_loop.js
 	$(WINE) ./qjs$(EXE) tests/test_bigint.js
 	$(WINE) ./qjs$(EXE) tests/test_cyclic_import.js
